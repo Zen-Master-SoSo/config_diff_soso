@@ -10,6 +10,9 @@ dependencies = ["rich"]
 [project.urls]
 Home = "https://github.com/Zen-Master-SoSo/config_diff_soso"
 
+[project.scripts]
+config-diff-soso = "config_diff_soso.__init__:main"
+
 [build-system]
 requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
