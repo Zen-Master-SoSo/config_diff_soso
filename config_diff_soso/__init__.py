@@ -49,7 +49,7 @@ from socket import gethostname
 from rich.console import Console
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 def rprint(string):
