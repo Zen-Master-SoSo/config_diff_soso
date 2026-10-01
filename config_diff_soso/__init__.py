@@ -50,7 +50,7 @@ from tempfile import TemporaryDirectory
 
 from rich.console import Console
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 
 class DownloadError(Exception):
