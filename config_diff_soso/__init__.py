@@ -38,18 +38,23 @@ This script uses debsums to extract the package maintainer's config file for
 every package on your system, and compares it to the version on your machine,
 saving a copy of each with another file showing the differences between them.
 """
-import logging, sys
+import logging
+import sys
 from argparse import ArgumentParser
-from subprocess import run
-from pathlib import Path
-from shutil import rmtree, copy2
-from tempfile import TemporaryDirectory
 from datetime import datetime
+from pathlib import Path
+from shutil import copy2, rmtree
 from socket import gethostname
+from subprocess import run
+from tempfile import TemporaryDirectory
+
 from rich.console import Console
 
-
 __version__ = "1.0.2"
+
+
+class DownloadError(Exception):
+	pass
 
 
 def rprint(string):
@@ -77,22 +82,40 @@ def get_user_confirmation(prompt = 'Are you sure', default_true = False):
 			return key.lower() == 'y'
 		print('  (Enter either "y" or "n")', end = '')
 
+def prompt_continue(options):
+	"""
+	Prompt the user to continue on errors, unless options.ignore_errors was given.
+	"""
+	if not options.ignore_errors:
+		print('Hit ENTER to continue, CTRL-C to quit.')
+		input()
+	print()
+
 def stdrun(args):
 	"""
 	Returns tuple (returncode, stdout, stderr)
+	Does not raise exceptions.
 	"""
-	rprint('[grey58]' + ' '.join(args) + '[/grey58]')
+	rprint('[grey58]' + ' '.join(args))
 	cp = run(args, text = True, capture_output = True, check = False)
 	return (cp.returncode, cp.stdout.strip(), cp.stderr.strip())
 
 def get_shell(args):
+	"""
+	Returns (str) stdout from subprocess.run
+	Raises RuntimeError
+	"""
 	returncode, stdout, stderr = stdrun(args)
 	if returncode == 0:
 		return stdout
 	raise RuntimeError(stderr)
 
 def run_check(args):
-	rprint('[grey58]' + ' '.join(args) + '[/grey58]')
+	"""
+	Executes subprocess.run with the given args, printing arg string.
+	Raises CalledProcessError
+	"""
+	rprint('[grey58]' + ' '.join(args))
 	run(args, check = True)
 
 def get_apt_var(args):
@@ -130,7 +153,10 @@ def cached_debs(package):
 	return [ path for path in get_archive().iterdir() if path.name.startswith(package) ]
 
 def download(package):
-	run_check(['sudo', 'apt-get', '-qq', 'install', '--reinstall', '--download-only', package])
+	returncode, _, stderr = stdrun(['sudo', 'apt-get',
+		'-qq', 'install', '--reinstall', '--download-only', package])
+	if returncode:
+		raise DownloadError(stderr.strip())
 
 def debfiles(package):
 	debs = cached_debs(package)
@@ -143,6 +169,8 @@ def extract_deb(debfile, tempdir):
 
 def main():
 	parser = ArgumentParser()
+	parser.add_argument('--ignore-errors', '-i', action = 'store_true',
+		help = 'Continue on errors (otherwise you will be prompted)')
 	parser.add_argument('--verbose', '-v', action = 'store_true',
 		help = 'Show more detailed debug information')
 	parser.epilog = __doc__
@@ -152,7 +180,7 @@ def main():
 		format="[%(filename)24s:%(lineno)3d] %(levelname)-8s %(message)s"
 	)
 
-	date_string = datetime.now().strftime('%Y-%m-%d-%H-%M')
+	date_string = datetime.now().strftime('%Y-%m-%d-%H-%M')	# noqa: DTZ005
 	root_path = Path(f'{gethostname()}-config-diff-{date_string}')
 	if root_path.exists():
 		print(f'"{root_path}" exists. Do you want to delete and replace its contents?')
@@ -167,35 +195,44 @@ def main():
 		raise RuntimeError('No archive dir found at: ' + str(get_archive()))
 
 	for package in installed_packages():
-		changed_filenames = changed_files(package)
-		if not changed_filenames:
-			continue
-		print(f'{package} changed')
-		with TemporaryDirectory() as tempdir:
-			tempdir_path = Path(tempdir)
-			for debfile in debfiles(package):
-				extract_deb(str(debfile), tempdir)
-			for changed_filename in changed_filenames:
-				changed_filename_relative = changed_filename.lstrip('/')
-				extracted_path = tempdir_path / changed_filename_relative
-				if not extracted_path.exists():
-					rprint(f'[red][bold]"{extracted_path}"[/bold] was not found.[/red]')
-					rprint('[red]This indicates a very severe error...[/red]')
-					rprint('[red]ALL changed files should be in the original package![/red]')
-					print()
+		if changed_filenames := changed_files(package):
+			print(f'{package} changed')
+			with TemporaryDirectory() as tempdir:
+				tempdir_path = Path(tempdir)
+
+				try:
+					for debfile in debfiles(package):
+						extract_deb(str(debfile), tempdir)
+				except DownloadError as e:
+					rprint(f'[red]Error downloading deb file for "[bold]{package}[/bold]":')
+					rprint(f'[red]{e}')
+					prompt_continue()
 					continue
-				change_dir = root_path / changed_filename_relative
-				if not change_dir.exists():
-					change_dir.mkdir(parents = True)
-				copy2(extracted_path, change_dir / 'original')
-				copy2(changed_filename, change_dir / 'yours')
-				returncode, stdout, stderr = stdrun(['diff', '--suppress-common-lines',
-					str(change_dir / 'original'), str(change_dir / 'yours')])
-				if returncode == 1:
-					diff_file = change_dir / 'diff'
-					diff_file.write_text(stdout)
-				else:
-					print(f'"diff" reported an error? "{stderr}"')
+
+				for changed_filename_absolute in changed_filenames:
+					changed_filename = changed_filename_absolute.lstrip('/')
+					extracted_path = tempdir_path / changed_filename
+					if not extracted_path.exists():
+						rprint(f'[red]"[bold]{extracted_path}[/bold]" was not found.')
+						rprint('[red]This indicates a very severe error...')
+						rprint('[red]ALL changed files should be in the original package!')
+						prompt_continue()
+						continue
+					change_dir = root_path / changed_filename
+					if not change_dir.exists():
+						change_dir.mkdir(parents = True)
+					copy2(extracted_path, change_dir / 'original')
+					copy2(changed_filename_absolute, change_dir / 'yours')
+					returncode, stdout, stderr = stdrun(['diff', '--suppress-common-lines',
+						str(change_dir / 'original'), str(change_dir / 'yours')])
+					if returncode == 1:
+						diff_file = change_dir / 'diff'
+						diff_file.write_text(stdout)
+					else:
+						rprint('[red]The "diff" command had an error')
+						rprint(f'[red]"[bold]{changed_filename}[/bold]"')
+						rprint(f'[red]{stderr}')
+						prompt_continue()
 	return 0
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ $ python3 -m pip install config_diff_soso
 ## Usage
 
 ```bash
-$ config_diff_soso
+$ config-diff-soso
 ```
 
 ## What it does
